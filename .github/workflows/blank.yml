@@ -1,0 +1,153 @@
+
+name: Descomprimir y generar APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Buscar y descomprimir ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . -maxdepth 3 -type f \
+            -iname "*.zip" \
+            -not -path "./_unpacked/*" \
+            -print -quit)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: No se encontró ningún ZIP."
+            exit 1
+          fi
+
+          echo "ZIP encontrado: $ZIP"
+
+          mkdir -p _unpacked
+          unzip -o "$ZIP" -d _unpacked
+
+          PACKAGE=$(find _unpacked \
+            -name package.json \
+            -not -path "*/node_modules/*" \
+            -print -quit)
+
+          if [ -z "$PACKAGE" ]; then
+            echo "ERROR: No se encontró package.json dentro del ZIP."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PACKAGE")
+
+          echo "Proyecto encontrado: $PROJECT_DIR"
+
+          cp -a "$PROJECT_DIR"/. .
+
+          rm -rf _unpacked
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Instalar dependencias y Capacitor
+        run: |
+          npm install --legacy-peer-deps
+
+          npm install --legacy-peer-deps \
+            @capacitor/core@7 \
+            @capacitor/cli@7 \
+            @capacitor/android@7
+
+      - name: Configurar Capacitor
+        run: |
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.camilajazmin.app",
+            "appName": "Camila Jazmin",
+            "webDir": "out"
+          }
+          EOF
+
+      - name: Configurar exportación de Next.js
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+
+          const file = fs.existsSync('next.config.mjs')
+            ? 'next.config.mjs'
+            : fs.existsSync('next.config.js')
+              ? 'next.config.js'
+              : null;
+
+          if (!file) {
+            fs.writeFileSync(
+              'next.config.mjs',
+              'const nextConfig = { output: "export", images: { unoptimized: true } };\nexport default nextConfig;\n'
+            );
+          } else {
+            let text = fs.readFileSync(file, 'utf8');
+
+            if (!text.includes('output:')) {
+              text = text.replace(
+                /const nextConfig\s*=\s*\{/,
+                'const nextConfig = { output: "export",'
+              );
+            }
+
+            if (!text.includes('unoptimized')) {
+              text = text.replace(
+                /images:\s*\{/,
+                'images: { unoptimized: true,'
+              );
+            }
+
+            fs.writeFileSync(file, text);
+          }
+          EOF
+
+      - name: Compilar Next.js
+        run: npx next build
+
+      - name: Verificar archivos exportados
+        run: |
+          if [ ! -d out ]; then
+            echo "ERROR: Next.js no generó la carpeta out."
+            exit 1
+          fi
+
+          ls -la out
+
+      - name: Crear proyecto Android
+        run: npx cap add android
+
+      - name: Sincronizar Capacitor
+        run: npx cap sync android
+
+      - name: Generar APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Camila-Jazmin-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
